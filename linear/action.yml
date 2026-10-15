@@ -1,0 +1,71 @@
+name: TestFlight feedback to Linear
+description: Import original TestFlight feedback and assets into a Linear project with repeat-run protection
+inputs:
+  testflight_issuer_id:
+    description: App Store Connect issuer ID
+    required: true
+  testflight_key_id:
+    description: App Store Connect key ID
+    required: true
+  testflight_private_key:
+    description: App Store Connect private key in PEM format (raw .p8 content, not base64)
+    required: true
+  testflight_bundle_id:
+    description: Bundle identifier of the Apple app
+    required: true
+  linear_api_token:
+    description: Linear personal API key
+    required: true
+  linear_team_id:
+    description: Linear team UUID
+    required: true
+  linear_project_id:
+    description: Linear project UUID belonging to the selected team
+    required: true
+  require_triage:
+    description: Require enabled team Triage and explicitly route new issues there
+    default: 'true'
+  dry_run:
+    description: Read-only preview without uploads, issues, or comments
+    default: 'true'
+  since:
+    description: ISO timestamp for backfill; defaults to seven days ago
+    required: false
+outputs:
+  created:
+    description: Issues created
+    value: ${{ steps.import.outputs.created }}
+  skipped:
+    description: Previously imported reports skipped without comments
+    value: ${{ steps.import.outputs.skipped }}
+  preview:
+    description: Reports that would be imported in dry-run mode
+    value: ${{ steps.import.outputs.preview }}
+runs:
+  using: composite
+  steps:
+    - name: Install pinned runtime and dependencies
+      shell: bash
+      env:
+        ACTION_DIRECTORY: ${{ github.action_path }}
+      run: |
+        test "$RUNNER_OS" = Linux && test "$RUNNER_ARCH" = X64
+        npm install --prefix "$RUNNER_TEMP/testflight-pm-runtime" --ignore-scripts @oven/bun-linux-x64@1.3.0
+        cd "$ACTION_DIRECTORY/.."
+        "$RUNNER_TEMP/testflight-pm-runtime/node_modules/@oven/bun-linux-x64/bin/bun" install --frozen-lockfile --ignore-scripts
+    - name: Import feedback
+      id: import
+      shell: bash
+      env:
+        ACTION_DIRECTORY: ${{ github.action_path }}
+        TESTFLIGHT_ISSUER_ID: ${{ inputs.testflight_issuer_id }}
+        TESTFLIGHT_KEY_ID: ${{ inputs.testflight_key_id }}
+        TESTFLIGHT_PRIVATE_KEY: ${{ inputs.testflight_private_key }}
+        TESTFLIGHT_BUNDLE_ID: ${{ inputs.testflight_bundle_id }}
+        LINEAR_API_TOKEN: ${{ inputs.linear_api_token }}
+        LINEAR_TEAM_ID: ${{ inputs.linear_team_id }}
+        LINEAR_PROJECT_ID: ${{ inputs.linear_project_id }}
+        REQUIRE_TRIAGE: ${{ inputs.require_triage }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        SINCE: ${{ inputs.since }}
+      run: '"$RUNNER_TEMP/testflight-pm-runtime/node_modules/@oven/bun-linux-x64/bin/bun" run "$ACTION_DIRECTORY/run.ts"'

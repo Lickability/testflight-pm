@@ -320,3 +320,7 @@ Or test in GitHub Actions with dry run mode:
 
 - 🐛 [Report Issues](https://github.com/vishrutkmr7/testflight-pm/issues)
 - 💬 [Discussions](https://github.com/vishrutkmr7/testflight-pm/discussions)
+
+## Deterministic Linear project import
+
+The [Linear action](linear/README.md) imports original feedback and persistent assets into a selected project, supports explicit Triage routing, and offers a read-only preview and repeat-run protection without LLM processing.

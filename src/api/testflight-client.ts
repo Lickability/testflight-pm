@@ -84,17 +84,21 @@ export class TestFlightClient {
 		params?: TestFlightQueryParams,
 	): Promise<TestFlightScreenshotFeedback[]> {
 		const queryParams = {
+			include: "build",
 			limit: DEFAULT_TESTFLIGHT_CONFIG.DEFAULT_LIMIT,
 			sort: DEFAULT_TESTFLIGHT_CONFIG.DEFAULT_SORT,
 			...params,
 		};
 
-		const response = await this.makeApiRequest<AppBetaFeedbackScreenshotSubmissionsResponse>(
-			`/apps/${appId}/betaFeedbackScreenshotSubmissions`,
-			queryParams,
+		let response = await this.makeApiRequest<AppBetaFeedbackScreenshotSubmissionsResponse>(
+			`/apps/${appId}/betaFeedbackScreenshotSubmissions`, queryParams,
 		);
-
-		return response.data;
+		const data = [...response.data];
+		while (response.links?.next) {
+			response = await this.makeApiRequest<AppBetaFeedbackScreenshotSubmissionsResponse>(response.links.next);
+			data.push(...response.data);
+		}
+		return data;
 	}
 
 	/**
@@ -460,17 +464,21 @@ export class TestFlightClient {
 		params?: TestFlightQueryParams,
 	): Promise<TestFlightCrashReport[]> {
 		const queryParams = {
+			include: "build",
 			limit: DEFAULT_TESTFLIGHT_CONFIG.DEFAULT_LIMIT,
 			sort: DEFAULT_TESTFLIGHT_CONFIG.DEFAULT_SORT,
 			...params,
 		};
 
-		const response = await this.makeApiRequest<AppBetaFeedbackCrashSubmissionsResponse>(
-			`/apps/${appId}/betaFeedbackCrashSubmissions`,
-			queryParams,
+		let response = await this.makeApiRequest<AppBetaFeedbackCrashSubmissionsResponse>(
+			`/apps/${appId}/betaFeedbackCrashSubmissions`, queryParams,
 		);
-
-		return response.data;
+		const data = [...response.data];
+		while (response.links?.next) {
+			response = await this.makeApiRequest<AppBetaFeedbackCrashSubmissionsResponse>(response.links.next);
+			data.push(...response.data);
+		}
+		return data;
 	}
 
 	/**
@@ -997,6 +1005,16 @@ export class TestFlightClient {
 		}
 	}
 
+	/** Apple's version/build are related resources, not feedback attributes. */
+	private async hydrateBuild(feedback: TestFlightCrashReport | TestFlightScreenshotFeedback): Promise<void> {
+		const buildId = feedback.relationships?.build?.data?.id;
+		if (!buildId) return; // Leave unavailable metadata explicitly Unknown.
+		const response = await this.makeApiRequest<any>(`/builds/${buildId}`, { include: "preReleaseVersion" });
+		feedback.attributes.buildNumber = response.data.attributes.version;
+		const version = response.included?.find((resource: any) => resource.type === "preReleaseVersions");
+		if (version) feedback.attributes.appVersion = version.attributes.version;
+	}
+
 	/**
 	 * Processes crash reports with enhanced details (including detailed crash logs and system metadata)
 	 */
@@ -1005,6 +1023,7 @@ export class TestFlightClient {
 		processedData: ProcessedFeedbackData[],
 	): Promise<void> {
 		for (const crash of crashes) {
+			await this.hydrateBuild(crash);
 			let processedCrash = this.processCrashReport(crash);
 
 			// ENHANCEMENT: Get detailed crash submission metadata for richer debugging context
@@ -1054,6 +1073,7 @@ export class TestFlightClient {
 		processedData: ProcessedFeedbackData[],
 	): Promise<void> {
 		for (const screenshot of screenshots) {
+			await this.hydrateBuild(screenshot);
 			const processedScreenshot = this.processScreenshotFeedback(screenshot);
 
 			// ENHANCEMENT: Get detailed screenshot submission with optimized field selection
@@ -1210,6 +1230,7 @@ export class TestFlightClient {
 			testerInfo: attrs.email ? {
 				email: attrs.email,
 			} : undefined,
+			screenshotData: attrs.comment ? { text: attrs.comment, images: [] } : undefined,
 			crashData: {
 				// Real API may not have crash trace/type directly in submission
 				// These might be in the related crashLog resource
@@ -1262,7 +1283,7 @@ export class TestFlightClient {
 			} : undefined,
 			screenshotData: {
 				text: feedbackText,
-				images: attrs.screenshots.map((img, index) => ({
+				images: (attrs.screenshots || []).map((img, index) => ({
 					url: img.url,
 					fileName:
 						img.fileName ||

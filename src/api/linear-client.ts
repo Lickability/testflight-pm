@@ -67,6 +67,7 @@ export class LinearClient {
 			customTitle?: string;
 			customDescription?: string;
 			priority?: LinearPriority;
+			requireTriage?: boolean;
 		},
 	): Promise<LinearIssue> {
 		try {
@@ -75,13 +76,14 @@ export class LinearClient {
 				const duplicateIssue = await this.findDuplicateIssue(feedback);
 				if (duplicateIssue) {
 					console.log(
-						`Duplicate issue found: ${duplicateIssue.identifier}. Adding comment instead.`,
+						`Duplicate issue found: ${duplicateIssue.identifier}. Leaving existing issue unchanged.`,
 					);
-					await this.addTestFlightCommentToIssue(duplicateIssue.id, feedback);
 					return duplicateIssue;
 				}
 			}
 
+			const stateId = await this.validateDestination(projectId, options?.requireTriage ?? false);
+			feedback = await this.preserveAssets(feedback);
 			const issueData = this.prepareIssueFromTestFlight(
 				feedback,
 				additionalLabels,
@@ -98,6 +100,7 @@ export class LinearClient {
 				priority: this.mapPriorityToLinearPriority(issueData.priority),
 				assigneeId: issueData.assigneeId,
 				projectId: issueData.projectId,
+				stateId,
 			});
 
 			if (!issueCreatePayload.success) {
@@ -122,6 +125,62 @@ export class LinearClient {
 				`Failed to create Linear issue from TestFlight feedback: ${error}`,
 			);
 		}
+	}
+
+	/** Fail closed if routing is unavailable; never silently fall back to Backlog. */
+	public async validateDestination(projectId?: string, requireTriage = true): Promise<string | undefined> {
+		if (requireTriage && !projectId) throw new Error("Linear project ID is required");
+		if (projectId) {
+			const project = await this.sdk.project(projectId);
+			let teams = await project.teams();
+			while (!teams.nodes.some(t => t.id === this.config.teamId) && teams.pageInfo.hasNextPage) {
+				await teams.fetchNext();
+			}
+			if (!teams.nodes.some(t => t.id === this.config.teamId)) throw new Error("Project does not belong to the configured team");
+		}
+		if (!requireTriage) return undefined;
+		const team = await this.sdk.team(this.config.teamId);
+		if (!team.triageEnabled) throw new Error("Enable Triage for the configured team before importing");
+		const triage = await team.triageIssueState;
+		if (!triage || triage.type !== "triage") throw new Error("Triage state is unavailable");
+		return triage.id;
+	}
+
+	/** Upload before issue creation; retry after failures without a partial issue. */
+	private async preserveAssets(feedback: ProcessedFeedbackData): Promise<ProcessedFeedbackData> {
+		const result = structuredClone(feedback);
+		const upload = async (body: Blob, name: string): Promise<string> => {
+			const payload = await this.sdk.fileUpload(body.type, name, body.size);
+			if (!payload.success || !payload.uploadFile) throw new Error("Linear upload preparation failed");
+			const file = payload.uploadFile;
+			const headers = new Headers({ "Content-Type": body.type, "Cache-Control": "public, max-age=31536000" });
+			file.headers.forEach(({ key, value }) => headers.set(key, value));
+			const response = await fetch(file.uploadUrl, { method: "PUT", headers, body, signal: AbortSignal.timeout(60_000) });
+			if (!response.ok) throw new Error(`Linear upload failed (${response.status})`);
+			return file.assetUrl;
+		};
+		const download = async (url: string): Promise<Blob> => {
+			const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+			if (!response.ok) throw new Error(`Apple asset download failed (${response.status})`);
+			return new Blob([await response.arrayBuffer()], { type: response.headers.get("Content-Type") || "application/octet-stream" });
+		};
+		if (result.screenshotData) {
+			const images = result.screenshotData.enhancedImages?.length ? result.screenshotData.enhancedImages : result.screenshotData.images;
+			result.screenshotData.images = await Promise.all(images.map(async image => ({
+				...image, url: await upload(await download(image.url), image.fileName),
+			})));
+		}
+		if (result.crashData) {
+			const logs = result.crashData.detailedLogs || [];
+			for (let index = 0; index < logs.length; index++) {
+				const url = await upload(new Blob([logs[index]!], { type: "text/plain" }), `testflight-${feedback.id}-${index + 1}.ips`);
+				result.crashData.logs.push({ url, expiresAt: new Date(0) });
+			}
+			for (const log of result.crashData.logs.slice(0, result.crashData.logs.length - logs.length)) {
+				log.url = await upload(await download(log.url), `testflight-${feedback.id}.ips`);
+			}
+		}
+		return result;
 	}
 
 	/**
@@ -240,33 +299,24 @@ export class LinearClient {
 	public async findDuplicateIssue(
 		feedback: ProcessedFeedbackData,
 	): Promise<LinearIssue | null> {
-		try {
-			// Simple search for issues containing the TestFlight ID
-			const searchQuery = `TestFlight ID: ${feedback.id}`;
-
+		// Match both upstream table descriptions and the older plain-text form.
+		// Include archived issues so closing/archiving never reimports feedback.
+		let after: string | undefined;
+		do {
 			const issues = await this.sdk.issues({
-				filter: {
-					team: { id: { eq: this.config.teamId } },
-					or: [
-						{ title: { containsIgnoreCase: feedback.id } },
-						{ description: { containsIgnoreCase: searchQuery } },
-					],
-				},
-				first: 5,
+				filter: { team: { id: { eq: this.config.teamId } }, description: { contains: feedback.id } },
+				includeArchived: true, first: 100, after,
 			});
-
 			for (const issue of issues.nodes) {
-				const description = await issue.description;
-				if (description?.includes(`TestFlight ID: ${feedback.id}`)) {
+				const description = (await issue.description) || "";
+				if (description.includes(`| **TestFlight ID** | \`${feedback.id}\` |`) ||
+					description.split("\n").some(line => line.trim() === `TestFlight ID: ${feedback.id}`)) {
 					return await this.convertToLinearIssue(issue);
 				}
 			}
-
-			return null;
-		} catch (error) {
-			console.warn(`Error searching for duplicate issues: ${error}`);
-			return null;
-		}
+			after = issues.pageInfo.hasNextPage ? issues.pageInfo.endCursor : undefined;
+		} while (after);
+		return null;
 	}
 
 	/**
@@ -686,6 +736,7 @@ export class LinearClient {
 			customTitle?: string;
 			customDescription?: string;
 			priority?: LinearPriority;
+			requireTriage?: boolean;
 		},
 	) {
 		const isCrash = feedback.type === "crash";
@@ -815,7 +866,7 @@ export class LinearClient {
 			if (feedback.crashData.logs.length > 0) {
 				description += "### Crash Logs\n";
 				feedback.crashData.logs.forEach((log, index) => {
-					description += `- [Crash Log ${index + 1}](${log.url}) (expires: ${log.expiresAt.toLocaleDateString()})\n`;
+					description += `- [Crash Log ${index + 1}](${log.url}) \n`;
 				});
 				description += "\n";
 			}
@@ -834,7 +885,7 @@ export class LinearClient {
 			}
 
 			if (feedback.screenshotData.images.length > 0) {
-				description += `**Screenshots:** ${feedback.screenshotData.images.length} attached`;
+				description += feedback.screenshotData.images.map((image, index) => `![TestFlight screenshot ${index + 1}](${image.url})`).join("\n\n");
 
 				// Add enhanced screenshot info if available
 				if (feedback.screenshotData.enhancedImages && feedback.screenshotData.enhancedImages.length > 0) {

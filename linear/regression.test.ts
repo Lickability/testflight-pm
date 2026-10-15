@@ -137,3 +137,22 @@ test('duplicate lookup paginates and does not match another report ID', async ()
  };
  expect((await c.findDuplicateIssue(feedback)).id).toBe('match');
 });
+
+import { validateApplicationConfig } from '../src/config/validation';
+import { generateKeyPairSync } from 'node:crypto';
+
+test('GitHub Actions accepts Linear-only configuration without a GitHub issue token', () => {
+ const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+ const config: any = {
+  isGitHubAction: true,
+  appStoreConnect: {
+   issuerId: '11111111-1111-4111-8111-111111111111', keyId: 'ABCDEFGHIJ',
+   privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), bundleId: 'com.example.app',
+  },
+  linear: { apiToken: 'test-only', teamId: 'team', defaultLabels: ['testflight'], crashLabels: ['crash'], feedbackLabels: ['feedback'] },
+ };
+ expect(validateApplicationConfig(config).errors).toEqual([]);
+ expect(validateApplicationConfig(config).warnings).toEqual([]);
+ delete config.linear;
+ expect(validateApplicationConfig(config).isValid).toBe(false);
+});

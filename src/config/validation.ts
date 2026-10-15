@@ -284,7 +284,7 @@ export function validateApplicationConfig(config: ApplicationConfig): ConfigVali
     // Validate optional GitHub configuration if present
     if (config.github) {
         errors.push(...validateGitHubConfig(config.github));
-    } else if (config.isGitHubAction) {
+    } else if (config.isGitHubAction && !config.linear) {
         warnings.push("GitHub configuration missing in GitHub Action environment");
     }
 
@@ -314,8 +314,8 @@ export function validateApplicationConfig(config: ApplicationConfig): ConfigVali
     }
 
     // Environment-specific validations
-    if (config.isGitHubAction && !config.github) {
-        errors.push("GitHub configuration is required in GitHub Action environment");
+    if (config.isGitHubAction && !config.github && !config.linear) {
+        errors.push("GitHub or Linear configuration is required in GitHub Action environment");
     }
 
     return {
